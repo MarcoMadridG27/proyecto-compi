@@ -1,0 +1,23 @@
+\begin{tabular}{llcccccccc}\toprule
+ & & \multicolumn{3}{c}{Este compilador} & \multicolumn{2}{c}{gcc} & \multicolumn{2}{c}{clang} & gcc \\
+\cmidrule(lr){3-5}\cmidrule(lr){6-7}\cmidrule(lr){8-9}
+Programa & Vulnerabilidad & estatico & dinamico (mecanismo) & todos & stack-prot & asan+ubsan & asan+ubsan & -Wall \\\midrule
+v01 & desbordamiento de pila & S & bounds, canary & D & D & D & D & -- \\
+v02 & indice constante fuera de rango & S & bounds & D & -- & D & D & -- \\
+v03 & puntero nulo evidente & S & null, heap & D & C & D & D & -- \\
+v04 & puntero nulo dinamico & -- & null, heap & D & C & D & D & -- \\
+v05 & division entre cero & -- & div & D & C & D & D & -- \\
+v06 & desbordamiento de entero & -- & overflow & D & -- & D & D & -- \\
+v07 & desbordamiento constante & S & div, overflow & D & C & D & D & W \\
+v08 & uso despues de liberar & S & heap & D & -- & D & D & -- \\
+v09 & doble liberacion & S & -- & D & D & D & D & -- \\
+v10 & variable sin inicializar & S & -- & -- & -- & -- & -- & -- \\
+v11 & retorno faltante & S & -- & -- & -- & -- & -- & -- \\
+v12 & recursion infinita & -- & recursion & D & C & D & D & -- \\
+v13 & puntero colgante & S & -- & -- & -- & -- & -- & W \\
+v14 & desbordamiento de heap & -- & heap & D & -- & D & D & -- \\
+v15 & indice de string & -- & bounds & D & -- & -- & -- & -- \\
+v16 & conversion insegura & S & -- & -- & -- & -- & -- & W \\
+\midrule
+Detectadas & & 10/16 & 11/16 & 12/16 & 2/16 & 11/16 & 11/16 & 3/16 \\
+\bottomrule\end{tabular}

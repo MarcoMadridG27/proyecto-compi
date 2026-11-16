@@ -1,0 +1,13 @@
+\begin{tabular}{lrrrrrrrr}\toprule
+Programa & gcc -O0 & gcc -O2 & clang -O0 & clang -O2 & propio -O0 & propio -O1 & Aceleracion -O1/-O0 & -O1 / gcc -O2 \\\midrule
+fib & 302 $\pm$ 46 & 99 $\pm$ 19 & 285 $\pm$ 5 & 184 $\pm$ 12 & 460 $\pm$ 25 & 355 $\pm$ 5 & 1.30$\times$ & 3.6$\times$ \\
+criba & 303 $\pm$ 45 & 282 $\pm$ 41 & 212 $\pm$ 40 & 281 $\pm$ 24 & 361 $\pm$ 22 & 429 $\pm$ 100 & 0.84$\times$ & 1.5$\times$ \\
+matmul & 131 $\pm$ 3 & 123 $\pm$ 14 & 162 $\pm$ 9 & 55 $\pm$ 3 & 369 $\pm$ 38 & 669 $\pm$ 114 & 0.55$\times$ & 5.4$\times$ \\
+primos & 154 $\pm$ 3 & 137 $\pm$ 7 & 161 $\pm$ 7 & 117 $\pm$ 13 & 460 $\pm$ 64 & 478 $\pm$ 108 & 0.96$\times$ & 3.5$\times$ \\
+oscilador & 561 $\pm$ 43 & 197 $\pm$ 12 & 570 $\pm$ 70 & 205 $\pm$ 11 & 1047 $\pm$ 92 & 1053 $\pm$ 116 & 0.99$\times$ & 5.3$\times$ \\
+vectores & 501 $\pm$ 34 & 119 $\pm$ 2 & 755 $\pm$ 193 & 123 $\pm$ 5 & 1009 $\pm$ 213 & 767 $\pm$ 50 & 1.31$\times$ & 6.4$\times$ \\
+burbuja & 79 $\pm$ 0 & 178 $\pm$ 10 & 108 $\pm$ 3 & 49 $\pm$ 0 & 325 $\pm$ 10 & 218 $\pm$ 1 & 1.49$\times$ & 1.2$\times$ \\
+memoria & 263 $\pm$ 9 & 234 $\pm$ 6 & 347 $\pm$ 46 & 208 $\pm$ 8 & 596 $\pm$ 53 & 469 $\pm$ 24 & 1.27$\times$ & 2.0$\times$ \\
+\midrule
+Media geometrica &  &  &  &  &  &  & 1.05$\times$ & 3.1$\times$ \\
+\bottomrule\end{tabular}

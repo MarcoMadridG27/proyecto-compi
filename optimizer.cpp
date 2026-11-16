@@ -1,4 +1,6 @@
 #include <climits>
+#include <functional>
+#include <set>
 #include "optimizer.h"
 
 using namespace std;
@@ -352,24 +354,6 @@ Exp* FoldVisitor::foldBinary(BinaryExp* b) {
             if (lc && lv == 1 && rightInt) { note(b, "1 * x => x"); return takeRight(b); }
             if (rc && rv == 0 && leftInt && opt::isPure(b->left)) { note(b, "x * 0 => 0 (x puro)"); return makeInt(0, b); }
             if (lc && lv == 0 && rightInt && opt::isPure(b->right)) { note(b, "0 * x => 0 (x puro)"); return makeInt(0, b); }
-            if (rc && rv == 2 && leftInt && opt::isPure(b->left)) {
-                note(b, "x * 2 => x + x");
-                BinaryExp* s = new BinaryExp(b->left, cloneExp(b->left), PLUS_OP, b->line, b->col);
-                s->operandType = Type(Type::INT);
-                s->inferredType = Type(Type::INT);
-                b->left = nullptr;
-                delete b;
-                return s;
-            }
-            if (lc && lv == 2 && rightInt && opt::isPure(b->right)) {
-                note(b, "2 * x => x + x");
-                BinaryExp* s = new BinaryExp(b->right, cloneExp(b->right), PLUS_OP, b->line, b->col);
-                s->operandType = Type(Type::INT);
-                s->inferredType = Type(Type::INT);
-                b->right = nullptr;
-                delete b;
-                return s;
-            }
             break;
         case DIV_OP:
             if (rc && rv == 1 && leftInt) { note(b, "x / 1 => x"); return takeLeft(b); }
@@ -582,6 +566,341 @@ Exp* SethiVisitor::post(Exp* e) {
     return e;
 }
 
+
+// ---------------------------------------------------------------------------------------
+// Recorrido generico para analisis previos
+// ---------------------------------------------------------------------------------------
+
+static void walkExp(Exp* e, const function<void(Exp*)>& f) {
+    if (!e) return;
+    f(e);
+    vector<Exp**> kids;
+    opt::childSlots(e, kids);
+    for (Exp** k : kids) walkExp(*k, f);
+}
+
+static void walkNode(ASTNode* n, const function<void(Exp*)>& onExp, const function<void(VarInit*)>& onInit) {
+    if (!n) return;
+    switch (n->nodeKind()) {
+        case NodeKind::BLOCK_STMT:
+            for (ASTNode* i : static_cast<BlockStmt*>(n)->items) walkNode(i, onExp, onInit);
+            break;
+        case NodeKind::VAR_DECL:
+            for (VarInit* vi : static_cast<VarDecl*>(n)->inits) {
+                onInit(vi);
+                walkExp(vi->initializer, onExp);
+                for (Exp* a : vi->ctorArgs) walkExp(a, onExp);
+            }
+            break;
+        case NodeKind::EXPR_STMT: walkExp(static_cast<ExprStmt*>(n)->expr, onExp); break;
+        case NodeKind::IF_STMT: {
+            IfStmt* s = static_cast<IfStmt*>(n);
+            walkExp(s->condition, onExp);
+            walkNode(s->thenStmt, onExp, onInit);
+            walkNode(s->elseStmt, onExp, onInit);
+            break;
+        }
+        case NodeKind::WHILE_STMT: {
+            WhileStmt* s = static_cast<WhileStmt*>(n);
+            walkExp(s->condition, onExp);
+            walkNode(s->body, onExp, onInit);
+            break;
+        }
+        case NodeKind::DO_WHILE_STMT: {
+            DoWhileStmt* s = static_cast<DoWhileStmt*>(n);
+            walkNode(s->body, onExp, onInit);
+            walkExp(s->condition, onExp);
+            break;
+        }
+        case NodeKind::FOR_STMT: {
+            ForStmt* s = static_cast<ForStmt*>(n);
+            if (s->initDecl) walkNode(s->initDecl, onExp, onInit);
+            for (Exp* e : s->initExprs) walkExp(e, onExp);
+            walkExp(s->condition, onExp);
+            for (Exp* e : s->updateExprs) walkExp(e, onExp);
+            walkNode(s->body, onExp, onInit);
+            break;
+        }
+        case NodeKind::RETURN_STMT: walkExp(static_cast<ReturnStmt*>(n)->expr, onExp); break;
+        default: break;
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// Propagacion de constantes
+// ---------------------------------------------------------------------------------------
+
+static bool isLocalVarId(const IdExp* id) {
+    return id->idKind == ID_VAR && id->var.storage == Storage::LOCAL && !id->isRefVar;
+}
+
+void ConstPropVisitor::analyze(FunDecl* fun) {
+    constants.clear();
+    if (!fun->body) return;
+    set<int> modified;
+    auto slotOf = [](Exp* x, int& s) {
+        if (x->nodeKind() != NodeKind::ID_EXP) return false;
+        IdExp* id = static_cast<IdExp*>(x);
+        if (id->idKind != ID_VAR || id->var.storage != Storage::LOCAL) return false;
+        s = id->var.offset;
+        return true;
+    };
+    vector<VarInit*> inits;
+    walkNode(fun->body,
+             [&](Exp* e) {
+                 int s;
+                 switch (e->nodeKind()) {
+                     case NodeKind::ASSIGN_EXP:
+                         if (slotOf(static_cast<AssignExp*>(e)->target, s)) modified.insert(s);
+                         break;
+                     case NodeKind::UNARY_EXP: {
+                         UnaryExp* u = static_cast<UnaryExp*>(e);
+                         if ((u->op == PRE_INC_UNARY || u->op == PRE_DEC_UNARY || u->op == ADDR_UNARY) && slotOf(u->exp, s)) modified.insert(s);
+                         break;
+                     }
+                     case NodeKind::BINARY_EXP: {
+                         BinaryExp* b = static_cast<BinaryExp*>(e);
+                         if (b->mode == BM_CIN && slotOf(b->right, s)) modified.insert(s);
+                         break;
+                     }
+                     case NodeKind::POSTFIX_EXP: {
+                         PostfixExp* p = static_cast<PostfixExp*>(e);
+                         if ((p->kind == POST_INC || p->kind == POST_DEC) && slotOf(p->base, s)) modified.insert(s);
+                         for (size_t i = 0; i < p->args.size(); i++) {
+                             if (slotOf(p->args[i], s) && i < p->argInfo.size() && p->argInfo[i].mode != AM_VALUE) modified.insert(s);
+                         }
+                         break;
+                     }
+                     default: break;
+                 }
+             },
+             [&](VarInit* vi) { inits.push_back(vi); });
+    for (VarInit* vi : inits) {
+        if (vi->info.storage != Storage::LOCAL || vi->isRef || vi->directInit || !vi->initializer) continue;
+        if (modified.count(vi->info.offset)) continue;
+        const Type& t = vi->info.type;
+        if (t.ptrLevel != 0 || !t.arrayDims.empty()) continue;
+        Val v;
+        Exp* init = vi->initializer;
+        if (t.kind == Type::INT && init->nodeKind() == NodeKind::NUMBER_EXP) {
+            v.kind = 1;
+            v.v = static_cast<NumberExp*>(init)->value;
+            if (v.v < INT_MIN || v.v > INT_MAX) continue;
+        } else if (t.kind == Type::BOOL && init->nodeKind() == NodeKind::BOOL_EXP) {
+            v.kind = 2;
+            v.v = static_cast<BoolExp*>(init)->value ? 1 : 0;
+        } else if (t.kind == Type::CHAR && init->nodeKind() == NodeKind::CHAR_EXP) {
+            v.kind = 3;
+            v.v = static_cast<CharExp*>(init)->value;
+        } else {
+            continue;
+        }
+        constants[vi->info.offset] = v;
+    }
+}
+
+void ConstPropVisitor::visit(FunDecl* fun) {
+    if (!wantsFunction(fun)) return;
+    analyze(fun);
+    fun->body->accept(this);
+}
+
+// &x necesita la variable real: no se sustituye su operando
+Type ConstPropVisitor::visit(UnaryExp* exp) {
+    if (exp->op != ADDR_UNARY) rwSlot(exp->exp);
+    return Type();
+}
+
+Exp* ConstPropVisitor::post(Exp* e) {
+    if (e->nodeKind() != NodeKind::ID_EXP) return e;
+    IdExp* id = static_cast<IdExp*>(e);
+    if (id->idKind != ID_VAR) return e;
+    string where = "L" + to_string(e->line) + ":C" + to_string(e->col) + " " + id->getFullName();
+    // constantes const con valor conocido (locales o globales)
+    if (id->var.hasConstVal && id->inferredType.ptrLevel == 0 && id->inferredType.arrayDims.empty() &&
+        id->inferredType.kind == Type::INT && !id->isRefVar) {
+        long long v = id->var.constVal;
+        if (v >= INT_MIN && v <= INT_MAX) {
+            Exp* n = makeInt(v, e);
+            delete e;
+            result.count++;
+            result.details.push_back(where + " => " + to_string(v) + " (const)");
+            return n;
+        }
+    }
+    if (!isLocalVarId(id)) return e;
+    auto it = constants.find(id->var.offset);
+    if (it == constants.end()) return e;
+    Exp* n = nullptr;
+    if (it->second.kind == 1) n = makeInt(it->second.v, e);
+    else if (it->second.kind == 2) n = makeBool(it->second.v != 0, e);
+    else {
+        CharExp* c = new CharExp(static_cast<char>(it->second.v), e->line, e->col);
+        c->inferredType = Type(Type::CHAR);
+        n = c;
+    }
+    delete e;
+    result.count++;
+    result.details.push_back(where + " => " + to_string(it->second.v));
+    return n;
+}
+
+// ---------------------------------------------------------------------------------------
+// Reduccion de fuerza
+// ---------------------------------------------------------------------------------------
+
+Exp* StrengthVisitor::post(Exp* e) {
+    if (e->nodeKind() != NodeKind::BINARY_EXP) return e;
+    BinaryExp* b = static_cast<BinaryExp*>(e);
+    if (b->mode != BM_NORMAL || b->op != MUL_OP || !opt::isPlainInt(b->inferredType)) return e;
+    if (!opt::isPlainInt(b->left->inferredType) || !opt::isPlainInt(b->right->inferredType)) return e;
+    long long lv = 0, rv = 0;
+    bool lc = opt::isLiteralInt(b->left, lv), rc = opt::isLiteralInt(b->right, rv);
+    auto pow2 = [](long long v, int& k) {
+        if (v < 2 || v > (1LL << 30) || (v & (v - 1)) != 0) return false;
+        k = 0;
+        while ((1LL << k) < v) k++;
+        return true;
+    };
+    int k = 0;
+    Exp* x = nullptr;
+    if (rc && pow2(rv, k)) {
+        x = b->left;
+        b->left = nullptr;
+    } else if (lc && pow2(lv, k) && !rc) {
+        x = b->right;
+        b->right = nullptr;
+    } else {
+        return e;
+    }
+    BinaryExp* s = new BinaryExp(x, makeInt(k, b), LSHIFT_OP, b->line, b->col);
+    s->operandType = Type(Type::INT);
+    s->inferredType = Type(Type::INT);
+    result.count++;
+    result.details.push_back("L" + to_string(b->line) + ":C" + to_string(b->col) + " x * " + to_string(1LL << k) + " => x << " + to_string(k));
+    delete b;
+    return s;
+}
+
+// ---------------------------------------------------------------------------------------
+// Eliminacion de codigo muerto e inalcanzable
+// ---------------------------------------------------------------------------------------
+
+void DeadCodeEliminator::note(const ASTNode* n, const string& what) {
+    result.count++;
+    result.details.push_back("L" + to_string(n->line) + ":C" + to_string(n->col) + " " + what);
+}
+
+static bool constCondition(Exp* c, bool& val) {
+    long long v;
+    if (!c || !opt::isLiteralInt(c, v)) return false;
+    val = v != 0;
+    return true;
+}
+
+bool DeadCodeEliminator::terminates(ASTNode* n) {
+    if (!n) return false;
+    switch (n->nodeKind()) {
+        case NodeKind::RETURN_STMT:
+        case NodeKind::BREAK_STMT:
+        case NodeKind::CONTINUE_STMT:
+            return true;
+        case NodeKind::BLOCK_STMT:
+            for (ASTNode* i : static_cast<BlockStmt*>(n)->items) {
+                if (terminates(i)) return true;
+            }
+            return false;
+        case NodeKind::IF_STMT: {
+            IfStmt* s = static_cast<IfStmt*>(n);
+            return s->elseStmt && terminates(s->thenStmt) && terminates(s->elseStmt);
+        }
+        default: return false;
+    }
+}
+
+Stmt* DeadCodeEliminator::simplifyStmt(Stmt* s) {
+    ASTNode* r = simplify(s);
+    if (!r) return new BlockStmt(s->line, s->col);
+    return static_cast<Stmt*>(r);
+}
+
+ASTNode* DeadCodeEliminator::simplify(ASTNode* n) {
+    switch (n->nodeKind()) {
+        case NodeKind::BLOCK_STMT:
+            block(static_cast<BlockStmt*>(n));
+            return n;
+        case NodeKind::IF_STMT: {
+            IfStmt* s = static_cast<IfStmt*>(n);
+            s->thenStmt = simplifyStmt(s->thenStmt);
+            if (s->elseStmt) s->elseStmt = simplifyStmt(s->elseStmt);
+            bool val;
+            if (!constCondition(s->condition, val)) return n;
+            Stmt* keep = val ? s->thenStmt : s->elseStmt;
+            note(s, string("if con condicion constante ") + (val ? "verdadera: se conserva la rama then" : "falsa: se conserva la rama else"));
+            if (val) s->thenStmt = nullptr;
+            else s->elseStmt = nullptr;
+            delete s;
+            return keep;
+        }
+        case NodeKind::WHILE_STMT: {
+            WhileStmt* s = static_cast<WhileStmt*>(n);
+            bool val;
+            if (constCondition(s->condition, val) && !val) {
+                note(s, "while con condicion falsa eliminado");
+                delete s;
+                return nullptr;
+            }
+            s->body = simplifyStmt(s->body);
+            return n;
+        }
+        case NodeKind::DO_WHILE_STMT: {
+            DoWhileStmt* s = static_cast<DoWhileStmt*>(n);
+            s->body = simplifyStmt(s->body);
+            return n;
+        }
+        case NodeKind::FOR_STMT: {
+            ForStmt* s = static_cast<ForStmt*>(n);
+            s->body = simplifyStmt(s->body);
+            return n;
+        }
+        default: return n;
+    }
+}
+
+void DeadCodeEliminator::block(BlockStmt* b) {
+    vector<ASTNode*> out;
+    bool dead = false;
+    for (ASTNode* it : b->items) {
+        if (dead) {
+            note(it, "codigo inalcanzable eliminado");
+            delete it;
+            continue;
+        }
+        ASTNode* r = simplify(it);
+        if (!r) continue;
+        out.push_back(r);
+        if (terminates(r)) dead = true;
+    }
+    b->items = out;
+}
+
+void DeadCodeEliminator::function(FunDecl* f) {
+    if (f->funKind != FunKind::NORMAL || !f->body) return;
+    block(f->body);
+}
+
+void DeadCodeEliminator::run(Program* prog) {
+    for (ASTNode* d : prog->declarations) {
+        if (d->nodeKind() == NodeKind::FUN_DECL) {
+            function(static_cast<FunDecl*>(d));
+        } else if (d->nodeKind() == NodeKind::RECORD_DECL) {
+            for (RecordMember* m : static_cast<RecordDecl*>(d)->members) {
+                if (m->funDecl) function(m->funDecl);
+            }
+        }
+    }
+}
+
 bool runOptimizations(Program* ast, TypeChecker& checker, const vector<string>& passes, OptReport& rep) {
     rep.enabled = true;
     auto wanted = [&](const string& n) {
@@ -601,27 +920,41 @@ bool runOptimizations(Program* ast, TypeChecker& checker, const vector<string>& 
         return true;
     };
 
+    auto step = [&](const char* name, PassResult res) {
+        rep.passes.push_back(name);
+        rep.results.push_back(res);
+        return recheck(name);
+    };
     if (wanted("inline")) {
         InlineVisitor v;
         v.analyze(ast);
         v.run(ast);
-        rep.passes.push_back("inline");
-        rep.results.push_back(v.result);
-        if (!recheck("inline")) return false;
+        if (!step("inline", v.result)) return false;
+    }
+    if (wanted("cprop")) {
+        ConstPropVisitor v;
+        v.run(ast);
+        if (!step("cprop", v.result)) return false;
     }
     if (wanted("fold")) {
         FoldVisitor v;
         v.run(ast);
-        rep.passes.push_back("fold");
-        rep.results.push_back(v.result);
-        if (!recheck("fold")) return false;
+        if (!step("fold", v.result)) return false;
+    }
+    if (wanted("strength")) {
+        StrengthVisitor v;
+        v.run(ast);
+        if (!step("strength", v.result)) return false;
+    }
+    if (wanted("dce")) {
+        DeadCodeEliminator v;
+        v.run(ast);
+        if (!step("dce", v.result)) return false;
     }
     if (wanted("sethi")) {
         SethiVisitor v;
         v.run(ast);
-        rep.passes.push_back("sethi");
-        rep.results.push_back(v.result);
-        if (!recheck("sethi")) return false;
+        if (!step("sethi", v.result)) return false;
     }
     return true;
 }

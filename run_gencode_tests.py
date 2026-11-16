@@ -19,6 +19,7 @@ import glob
 import os
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -81,6 +82,11 @@ def main():
     actualizar = "--update-expected" in sys.argv
     asan = "--asan" in sys.argv
     flags = "-g -fsanitize=address" if asan else ""
+    # --extra="-O1 --sec=all": opciones adicionales del compilador (las marcas ASM-* se omiten)
+    extra = []
+    for a in sys.argv[1:]:
+        if a.startswith("--extra="):
+            extra = shlex.split(a[len("--extra="):])
     filtro = [a for a in sys.argv[1:] if not a.startswith("--")]
 
     if subprocess.run(["make", "-s"], capture_output=True).returncode != 0:
@@ -105,7 +111,7 @@ def main():
         src = os.path.join(TEST_DIR, n + ".cpp")
         asm = os.path.join(OUT_DIR, n + ".s")
         esperado_error = marcas(src, "EXPECT-ERROR")
-        proc = subprocess.run([COMPILER, src, "--asm", asm], capture_output=True, text=True)
+        proc = subprocess.run([COMPILER, src, "--asm", asm] + extra, capture_output=True, text=True)
         salida = proc.stdout + proc.stderr
 
         if esperado_error:
@@ -123,10 +129,10 @@ def main():
 
         texto_asm = open(asm).read()
         falla = None
-        for m in marcas(src, "ASM-CONTAINS"):
+        for m in ([] if extra else marcas(src, "ASM-CONTAINS")):
             if m not in texto_asm:
                 falla = "el .s no contiene: " + m
-        for m in marcas(src, "ASM-ABSENT"):
+        for m in ([] if extra else marcas(src, "ASM-ABSENT")):
             if m in texto_asm:
                 falla = "el .s contiene: " + m
         if falla:

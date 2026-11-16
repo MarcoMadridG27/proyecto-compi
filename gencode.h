@@ -8,6 +8,7 @@
 #include "visitor.h"
 #include "ast.h"
 #include "layout.h"
+#include "security.h"
 
 using namespace std;
 
@@ -24,7 +25,10 @@ using namespace std;
 // devuelve su direccion. El Type que devuelve cada visit es solo exp->inferredType.
 class Gencode : public Visitor {
 public:
-    Gencode(const unordered_map<string, RecordDecl*>& records);
+    Gencode(const unordered_map<string, RecordDecl*>& records, const SecurityOptions& security = SecurityOptions());
+    bool peephole = false;            // -O1 con el pase peephole: optimiza el ensamblador generado
+    int peepholeCount = 0;
+    vector<string> peepholeDetails;
 
     void generate(Program* prog, ostream& out);
 
@@ -109,6 +113,7 @@ private:
     };
 
     const unordered_map<string, RecordDecl*>& records;
+    SecurityOptions sec;
 
     ostringstream text;
     ostringstream initCode;
@@ -197,6 +202,14 @@ private:
     void genCin(BinaryExp* e);
     void genIncDec(Exp* target, bool inc, bool post, int ptrScale);
     void genAssignString(AssignExp* e);
+
+    // seguridad en tiempo de ejecucion
+    void secFail(int kind, int line, int col);
+    void secCheckPtr(int line, int col);          // %rax = puntero a desreferenciar
+    void secCheckBoundsEax(int dim, int line, int col);
+    void secOverflowJump(int line, int col);      // tras una operacion aritmetica con OF
+    void callMalloc();
+    void callFree(int line, int col);
 
     // llamadas
     void genCallExp(PostfixExp* call);

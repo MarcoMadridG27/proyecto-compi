@@ -17,3 +17,10 @@ Proyecto2_Enunciado.pdf
 # Sistema
 .DS_Store
 *.d
+
+# LaTeX
+documentacion/reporte/*.aux
+documentacion/reporte/*.log
+documentacion/reporte/*.log2
+documentacion/reporte/*.out
+documentacion/reporte/*.toc

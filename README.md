@@ -19,7 +19,8 @@ El código está estructurado de manera modular y desacoplada:
 | **Visualizador** | `print_visitor.h`, `print_visitor.cpp` | Visitor que recorre el AST e imprime una representación jerárquica en consola con caracteres de árbol (`├── `, `└── `). |
 | **Semántico** | `type_checker.h`, `type_checker.cpp` | Visitor que realiza la comprobación de tipos, valida signaturas de funciones y detecta identificadores no declarados o redeclarados. |
 | **Layout** | `layout.h` | Estructuras `VarInfo`, `RecordLayout`, `FunctionLayout` con offsets, tamaños y alineaciones calculados por el TypeChecker. |
-| **Optimizador** | `optimizer.h`, `optimizer.cpp` | Pases opcionales sobre el AST (`FoldVisitor`, `InlineVisitor`, `SethiVisitor`) y análisis de pureza. Solo con `-O1`. |
+| **Optimizador** | `optimizer.h`, `optimizer.cpp`, `peephole.cpp` | Siete pases opcionales (inline, cprop, fold, strength, dce, sethi sobre el AST; peephole sobre el ensamblador) y análisis de pureza. Solo con `-O1`. |
+| **Seguridad** | `security.h`, `security.cpp`, `security_analysis.h`, `security_analysis.cpp` | Opciones `--sec`, análisis estático de seguridad con flujo de datos y definición de las violaciones dinámicas (las verificaciones se emiten en el Gencode). |
 | **API JSON** | `api.h`, `api.cpp` | Modo `--api`: tokens, AST (con y sin tipos), layout/ABI, ensamblador y estadísticas de optimización en un objeto JSON. |
 | **Gencode** | `gencode.h`, `gencode.cpp` | Visitor que emite ensamblador GNU AS (AT&T) para Linux x86-64, ABI System V, sin optimizaciones. Solo lee las anotaciones del AST. |
 | **Runtime** | `runtime/runtime.c` | `string` dinámico, `cout` y `cin` en C puro (sin libstdc++). |
@@ -58,7 +59,8 @@ make clean
 - `--ast`: Muestra el Árbol de Sintaxis Abstracta (AST) formateado en la terminal.
 - `--check`: Ejecuta el análisis semántico y comprobación de tipos detallada.
 - `--all`: Ejecuta todas las fases, muestra el AST y exporta los archivos `<archivo>_tokens.txt` y `<archivo>_ast.txt`.
-- `-O0` (por defecto) / `-O1`: con `-O1` corren los pases de optimización antes del Gencode. `--passes inline,fold,sethi` elige pases y `--report-opt` lista las transformaciones.
+- `-O0` (por defecto) / `-O1`: con `-O1` corren los pases de optimización. `--passes inline,cprop,fold,strength,dce,sethi,peephole` elige pases y `--report-opt` lista las transformaciones.
+- `--sec=lista` activa mecanismos de seguridad (`static,bounds,null,div,overflow,canary,heap,recursion,harden` o `all`); `--max-depth=N` fija el límite de recursión.
 - `--api --mode <scan|ast|check|asm|all>`: lee el código por stdin y responde JSON (lo usa el editor web).
 - `--asm [salida.s]`: Además del análisis, genera ensamblador x86-64 AT&T (por defecto `<archivo>.s`).
 
@@ -356,21 +358,65 @@ El TypeChecker calcula la clasificación (`INTEGER`, `SSE`, `MEMORY`) por eightb
 - `new T[n]` solo con una dimensión; parámetros de arreglo solo de una dimensión.
 - Métodos de `string`: `size`, `length`, `empty`, `clear`, `c_str`, `append`, `push_back`, `[]`, `==`, `!=`. No hay `+` entre strings.
 - Las funciones deben estar definidas en el archivo antes de usarse como firma; el parser no admite prototipos sin cuerpo.
-- Sin comprobación de límites en arreglos.
+- Sin comprobación de límites en arreglos por defecto; con `--sec=bounds` se verifica (ver sección 7b).
 
 ## 7. Optimizaciones (`-O1`)
 
-`-O0` es el modo por defecto y no ejecuta ningún pase. Con `-O1` corren, en este orden, tres visitors separados sobre el AST; después de cada uno se vuelve a ejecutar el TypeChecker, de modo que el Gencode recibe tipos, offsets y ABI actuales. Si esa verificación falla, la optimización se descarta y se compila sin optimizar.
+`-O0` es el modo por defecto y no ejecuta ningún pase. Con `-O1` corren, en este orden, siete técnicas; cada una se
+activa por separado con `--passes` (por defecto todas) y `--report-opt` lista las transformaciones. Después de cada pase
+del AST se vuelve a ejecutar el TypeChecker, de modo que el Gencode recibe tipos, offsets y ABI actualizados. Si esa
+verificación falla, la optimización se descarta y se compila sin optimizar.
 
-- **Inline**: solo funciones libres de una sola sentencia `return expr;`, escalares, sin llamadas, sin variables globales, sin `&&`/`||` y con argumentos puros del mismo tipo. Clona el AST. Rechaza recursión, argumentos con efectos, objetos y strings.
-- **Fold**: plegado de constantes enteras (sin overflow ni división por cero), identidades (`x+0`, `x*1`, `x/1`), `x*0` solo si `x` es puro, `x*2` a `x+x` solo si `x` es puro, y cortocircuito solo si el lado eliminado es puro. No toca floats, strings, records ni expresiones con efectos.
-- **Sethi**: en expresiones enteras puras intercambia los operandos de operadores conmutativos para evaluar primero el subárbol más pesado (menor profundidad de pila). No toca `&&`/`||`.
+| Pase | Qué hace |
+|---|---|
+| `inline` | Expande funciones libres de una sola sentencia `return expr;`, escalares, sin llamadas, globales ni `&&`/`||`, con argumentos puros del mismo tipo; rechaza recursión. |
+| `cprop` | Propaga constantes: variables locales inicializadas con un literal y nunca modificadas (ni `&x`, ni `cin`, ni referencia) y `const` de valor conocido. |
+| `fold` | Plegado de constantes enteras (sin overflow ni división por cero), identidades (`x+0`, `x*1`, `x/1`), `x*0` solo si `x` es puro, cortocircuito solo si el lado eliminado es puro. |
+| `strength` | Reducción de fuerza: `x * 2^k` pasa a `x << k` (se desactiva con `--sec=overflow`). |
+| `dce` | Elimina código inalcanzable tras `return`/`break`/`continue`, ramas de `if` con condición constante y `while` con condición falsa. |
+| `sethi` | En expresiones enteras puras intercambia operandos conmutativos para evaluar primero el subárbol más pesado. |
+| `peephole` | Optimización de mirilla sobre el ensamblador: fusiona `leaq`+carga, elimina `push`/`pop` de operandos simples, saltos a la etiqueta siguiente, `addq $0` y recargas inmediatas. |
 
 No se optimizan constructores, destructores, copias, asignaciones, `new`, `delete` ni inicializadores globales.
 
 ```bash
 python3 run_opt_tests.py    # compara -O0 y -O1 (salida y código de retorno) y el oráculo
 ```
+
+## 7b. Seguridad (`--sec=lista`)
+
+Se activa con `--sec=static,bounds,null,div,overflow,canary,heap,recursion,harden` o `--sec=all`. Los mecanismos dinámicos
+terminan el programa con el código de salida 70 y un mensaje con el tipo de error y su ubicación.
+
+| Mecanismo | Tipo | Detecta |
+|---|---|---|
+| `static` | tiempo de compilación | variables sin inicializar, función sin retorno en todos sus caminos, índices fuera de rango (constantes y bucles `for` acotados), desbordamiento y división entre cero en expresiones constantes, puntero nulo evidente, uso después de `delete`, doble `delete`, puntero colgante (dirección de local devuelta o que escapa de su bloque), conversiones inseguras |
+| `bounds` | ejecución | acceso fuera de límites en arreglos y `string` |
+| `null` | ejecución | desreferencia de puntero nulo (`*p`, `p->x`, `p[i]`) |
+| `div` | ejecución | división y módulo entre cero |
+| `overflow` | ejecución | desbordamiento de `int` en `+ - * ` negación, `++`/`--` e `INT_MIN / -1` |
+| `canary` | ejecución | desbordamiento de buffer en la pila (canario aleatorio en `-8(%rbp)`) |
+| `heap` | ejecución | doble `free`, `free` de un puntero ajeno, desbordamiento de heap (zona roja) y uso después de liberar (cuarentena) |
+| `recursion` | ejecución | recursión por encima de `--max-depth=N` (20000 por defecto) |
+| `harden` | enlace | PIE, pila no ejecutable y RELRO completo: enlazar con `-fPIE -pie -Wl,-z,relro,-z,now,-z,noexecstack` |
+
+```bash
+./compiler prog.cpp --asm prog.s --sec=bounds,canary -O1
+gcc prog.s runtime/runtime.c -o prog && ./prog
+python3 run_security_tests.py    # 16 programas con vulnerabilidades intencionales (vulnerabilidades/)
+```
+
+## 7c. Benchmarks, experimentos y reporte
+
+```bash
+benchmarks/ejecutar_experimentos.sh todo 10     # mide en un contenedor linux/amd64 (gcc 13 y clang 14)
+python3 documentacion/reporte/generar_datos.py  # tablas y figuras a partir de benchmarks/resultados/*.json
+documentacion/reporte/compilar.sh               # reporte.pdf (LaTeX dentro de Docker)
+```
+
+`benchmarks/` contiene 8 programas del subconjunto; `vulnerabilidades/` contiene 16 programas con vulnerabilidades
+intencionales. El alcance del subconjunto y su relación con el estándar se documenta en
+[`documentacion/ALCANCE_SUBCONJUNTO.md`](documentacion/ALCANCE_SUBCONJUNTO.md).
 
 ## 8. API y editor web (Docker)
 

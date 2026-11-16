@@ -1,0 +1,9 @@
+\begin{tabular}{lrrrrr}\toprule
+Configuracion & Instrucciones & Bytes de .text & Tamano del ejecutable (KB) & Compilacion (ms) & Tiempo ejec. (ms) \\\midrule
+gcc -O0 & 117 & 415 & 16.2 & 627.4 & 240 \\
+gcc -O2 & 149 & 551 & 16.0 & 846.2 & 162 \\
+clang -O0 & 127 & 514 & 16.5 & 1128.1 & 266 \\
+clang -O2 & 146 & 564 & 16.4 & 1554.0 & 131 \\
+propio -O0 & 238 & 699 & 22.4 & 103.8 & 525 \\
+propio -O1 & 196 & 611 & 22.4 & 110.1 & 502 \\
+\bottomrule\end{tabular}

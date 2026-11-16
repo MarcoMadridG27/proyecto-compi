@@ -1,0 +1,14 @@
+\begin{tabular}{lrrrr}\toprule
+Mecanismo & Sobrecarga media (\%) & Peor caso (\%) & Instrucciones (\%) & .text (\%) \\\midrule
+bounds & +6.3 & +36.6 & +8.1 & +12.6 \\
+null & +4.0 & +21.2 & +0.7 & +1.1 \\
+div & +8.3 & +41.5 & +3.6 & +5.5 \\
+overflow & +13.6 & +70.6 & +21.6 & +33.2 \\
+canary & +0.6 & +41.8 & +9.5 & +16.4 \\
+heap & +2.3 & +21.3 & +0.0 & +0.0 \\
+recursion & +8.2 & +38.3 & +8.4 & +16.4 \\
+harden & +9.4 & +63.3 & +0.0 & +0.0 \\
+todos (--sec=all) & +77.1 & +3774.3 & +52.4 & +85.7 \\
+\midrule
+todos con -O1 (vs -O1) & +75.5 & +4925.0 & -- & -- \\
+\bottomrule\end{tabular}

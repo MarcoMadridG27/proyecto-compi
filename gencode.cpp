@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <stdexcept>
 #include "gencode.h"
+#include "optimizer.h"
 
 using namespace std;
 
@@ -9,15 +10,22 @@ static const char* R32[6] = {"%edi", "%esi", "%edx", "%ecx", "%r8d", "%r9d"};
 static const char* R8[6]  = {"%dil", "%sil", "%dl", "%cl", "%r8b", "%r9b"};
 
 
-Gencode::Gencode(const unordered_map<string, RecordDecl*>& recs)
-    : records(recs), cur(nullptr), curFun(nullptr), program(nullptr), pushDepth(0), labelCount(0), constCount(0) {}
+Gencode::Gencode(const unordered_map<string, RecordDecl*>& recs, const SecurityOptions& security)
+    : records(recs), sec(security), cur(nullptr), curFun(nullptr), program(nullptr), pushDepth(0), labelCount(0), constCount(0) {}
 
 void Gencode::generate(Program* prog, ostream& out) {
     cur = &text;
     program = prog;
     prog->accept(this);
 
-    out << text.str();
+    string body = text.str();
+    if (peephole) {
+        PassResult pr;
+        body = runPeephole(body, pr);
+        peepholeCount = pr.count;
+        peepholeDetails = pr.details;
+    }
+    out << body;
     if (!bss.str().empty()) {
         out << "\t.bss\n" << bss.str();
     }
@@ -249,6 +257,64 @@ void Gencode::emitCall(const string& target) {
 
 void Gencode::callRuntime(const string& fn) {
     emitCall(fn + "@PLT");
+}
+
+// ---- Seguridad en tiempo de ejecucion ----
+// Toda violacion termina el programa con rt_fail(tipo, linea, columna).
+void Gencode::secFail(int kind, int line, int col) {
+    emit("movl $" + to_string(kind) + ", %edi");
+    emit("movl $" + to_string(line) + ", %esi");
+    emit("movl $" + to_string(col) + ", %edx");
+    callRuntime("rt_fail");
+}
+
+// %rax contiene un puntero que se va a desreferenciar. Con el asignador instrumentado
+// rt_check_ptr tambien detecta uso despues de liberar; si no, basta comparar con cero.
+void Gencode::secCheckPtr(int line, int col) {
+    if (sec.heap) {
+        emit("movq %rax, %rdi");
+        emit("movl $" + to_string(line) + ", %esi");
+        emit("movl $" + to_string(col) + ", %edx");
+        callRuntime("rt_check_ptr");
+    } else if (sec.nullchk) {
+        string ok = newLabel("nn");
+        emit("testq %rax, %rax");
+        emit("jne " + ok);
+        secFail(SEC_NULL, line, col);
+        label(ok);
+    }
+}
+
+// %eax contiene un indice; debe cumplir 0 <= indice < dim (la comparacion sin signo cubre ambos)
+void Gencode::secCheckBoundsEax(int dim, int line, int col) {
+    string ok = newLabel("bok");
+    emit("cmpl $" + to_string(dim) + ", %eax");
+    emit("jb " + ok);
+    secFail(SEC_BOUNDS, line, col);
+    label(ok);
+}
+
+// Despues de addl/subl/imull/negl: el flag OF indica desbordamiento con signo
+void Gencode::secOverflowJump(int line, int col) {
+    string ok = newLabel("ovk");
+    emit("jno " + ok);
+    secFail(SEC_OVERFLOW, line, col);
+    label(ok);
+}
+
+void Gencode::callMalloc() {
+    callRuntime(sec.heap ? "rt_malloc" : "malloc");
+}
+
+// %rdi contiene el puntero a liberar
+void Gencode::callFree(int line, int col) {
+    if (sec.heap) {
+        emit("movl $" + to_string(line) + ", %esi");
+        emit("movl $" + to_string(col) + ", %edx");
+        callRuntime("rt_free");
+    } else {
+        callRuntime("free");
+    }
 }
 
 RecordLayout* Gencode::layoutOf(const Type& t) const {
@@ -708,6 +774,7 @@ void Gencode::genAddr(Exp* e) {
         case NodeKind::UNARY_EXP: {
             UnaryExp* u = static_cast<UnaryExp*>(e);
             u->exp->accept(this);
+            if (u->op == DEREF_UNARY) secCheckPtr(u->line, u->col);
             return;
         }
         case NodeKind::ASSIGN_EXP:
@@ -717,19 +784,47 @@ void Gencode::genAddr(Exp* e) {
             PostfixExp* pf = static_cast<PostfixExp*>(e);
             switch (pf->kind) {
                 case ARRAY_ACCESS: {
-                    if (pf->base->inferredType.isString()) {
+                    const Type& bt = pf->base->inferredType;
+                    bool isStr = bt.isString();
+                    bool isPtrBase = !isStr && bt.arrayDims.empty() && bt.ptrLevel > 0;
+                    int dim = (!isStr && !bt.arrayDims.empty()) ? bt.arrayDims[0] : 0;
+                    if (isStr) {
                         genObjAddr(pf->base);
-                        emit("movq (%rax), %rax");
+                        if (sec.bounds) {
+                            // se apila el tamano ademas del puntero a los datos
+                            emit("movslq 8(%rax), %rcx");
+                            emit("movq (%rax), %rax");
+                            pushTemp(Type(Type::VOID, 1, false));
+                            emit("pushq %rcx");
+                            pushDepth++;
+                        } else {
+                            emit("movq (%rax), %rax");
+                            pushTemp(Type(Type::VOID, 1, false));
+                        }
                     } else {
                         pf->base->accept(this);
+                        if (isPtrBase) secCheckPtr(pf->line, pf->col);
+                        pushTemp(Type(Type::VOID, 1, false));
                     }
-                    pushTemp(Type(Type::VOID, 1, false));
                     pf->indexExp->accept(this);
+                    if (isStr && sec.bounds) {
+                        // s[i] es valido para 0 <= i <= size() (s[size()] es el '\0')
+                        string ok = newLabel("bok");
+                        emit("popq %rdx");
+                        pushDepth--;
+                        emit("cmpl %edx, %eax");
+                        emit("jbe " + ok);
+                        secFail(SEC_BOUNDS, pf->line, pf->col);
+                        label(ok);
+                    } else if (sec.bounds && dim > 0) {
+                        secCheckBoundsEax(dim, pf->line, pf->col);
+                    }
                     emit("movslq %eax, %rax");
                     emit("imulq $" + to_string(pf->elemSize) + ", %rax");
                     emit("popq %rcx");
                     pushDepth--;
                     emit("addq %rcx, %rax");
+                    if (sec.heap && isPtrBase) secCheckPtr(pf->line, pf->col);
                     return;
                 }
                 case DOT_ACCESS:
@@ -739,6 +834,7 @@ void Gencode::genAddr(Exp* e) {
                     return;
                 case ARROW_ACCESS:
                     pf->base->accept(this);
+                    secCheckPtr(pf->line, pf->col);
                     emit("addq $" + to_string(pf->fieldOffset) + ", %rax");
                     if (pf->fieldIsRef) emit("movq (%rax), %rax");
                     return;
@@ -831,6 +927,7 @@ Type Gencode::visit(UnaryExp* exp) {
             switch (cls(rt)) {
                 case C_INT:
                     emit("negl %eax");
+                    if (sec.overflow) secOverflowJump(exp->line, exp->col);
                     break;
                 case C_FLOAT:
                     emit("movd %xmm0, %eax");
@@ -856,6 +953,7 @@ Type Gencode::visit(UnaryExp* exp) {
             break;
         case DEREF_UNARY:
             exp->exp->accept(this);
+            secCheckPtr(exp->line, exp->col);
             loadFrom(rt, "(%rax)");
             break;
         case ADDR_UNARY:
@@ -883,11 +981,19 @@ void Gencode::genIncDec(Exp* target, bool inc, bool post, int ptrScale) {
         case C_INT: {
             bool isChar = (t.kind == Type::CHAR);
             emit(string(isChar ? "movsbl" : "movl") + " (%rcx), %eax");
+            bool chk = sec.overflow && !isChar;
             if (post) {
-                emit("leal " + delta + "(%rax), %edx");
+                if (chk) {
+                    emit("movl %eax, %edx");
+                    emit(string(op) + "l $1, %edx");
+                    secOverflowJump(target->line, target->col);
+                } else {
+                    emit("leal " + delta + "(%rax), %edx");
+                }
                 emit(string(isChar ? "movb %dl" : "movl %edx") + ", (%rcx)");
             } else {
                 emit(string(op) + "l $1, %eax");
+                if (chk) secOverflowJump(target->line, target->col);
                 emit(string(isChar ? "movb %al" : "movl %eax") + ", (%rcx)");
             }
             break;
@@ -979,7 +1085,7 @@ Type Gencode::visit(NewExp* exp) {
 
     if (!isArr) {
         emit("movl $" + to_string(exp->elemSize) + ", %edi");
-        callRuntime("malloc");
+        callMalloc();
         if (!classLike) return exp->inferredType;
         string slot = to_string(exp->ptrTemp) + "(%rbp)";
         emit("movq %rax, " + slot);
@@ -1008,7 +1114,7 @@ Type Gencode::visit(NewExp* exp) {
     if (!classLike) {
         emit("imulq $" + to_string(exp->elemSize) + ", %rax");
         emit("movq %rax, %rdi");
-        callRuntime("malloc");
+        callMalloc();
         return exp->inferredType;
     }
     emit("pushq %rax");
@@ -1016,7 +1122,7 @@ Type Gencode::visit(NewExp* exp) {
     emit("movq %rax, %rdi");
     emit("imulq $" + to_string(exp->elemSize) + ", %rdi");
     if (exp->hasCookie) emit("addq $16, %rdi");
-    callRuntime("malloc");
+    callMalloc();
     if (exp->hasCookie) {
         emit("movq (%rsp), %rcx");
         emit("movq %rcx, (%rax)");
@@ -1056,7 +1162,7 @@ Type Gencode::visit(DeleteExp* exp) {
 
     if (!dtor) {
         emit("movq %rax, %rdi");
-        callRuntime("free");
+        callFree(exp->line, exp->col);
         return exp->inferredType;
     }
 
@@ -1070,7 +1176,7 @@ Type Gencode::visit(DeleteExp* exp) {
         genOp(OP_DESTROY, pt);
         emit("popq %rdi");
         pushDepth--;
-        callRuntime("free");
+        callFree(exp->line, exp->col);
     } else if (exp->hasCookie) {
         string lloop = newLabel("delloop");
         string lfree = newLabel("delfree");
@@ -1094,11 +1200,11 @@ Type Gencode::visit(DeleteExp* exp) {
         emit("popq %rdi");
         pushDepth--;
         emit("subq $16, %rdi");
-        callRuntime("free");
+        callFree(exp->line, exp->col);
     } else {
         emit("popq %rdi");
         pushDepth--;
-        callRuntime("free");
+        callFree(exp->line, exp->col);
     }
     label(ldone);
     return exp->inferredType;
@@ -1299,17 +1405,40 @@ void Gencode::genArith(BinaryExp* e) {
     emit("movl %eax, %ecx");
     popToResult(ot);
     switch (e->op) {
-        case PLUS_OP:    emit("addl %ecx, %eax"); break;
-        case MINUS_OP:   emit("subl %ecx, %eax"); break;
-        case MUL_OP:     emit("imull %ecx, %eax"); break;
-        case DIV_OP:
-            emit("cltd");
-            emit("idivl %ecx");
+        case PLUS_OP:
+            emit("addl %ecx, %eax");
+            if (sec.overflow) secOverflowJump(e->line, e->col);
             break;
+        case MINUS_OP:
+            emit("subl %ecx, %eax");
+            if (sec.overflow) secOverflowJump(e->line, e->col);
+            break;
+        case MUL_OP:
+            emit("imull %ecx, %eax");
+            if (sec.overflow) secOverflowJump(e->line, e->col);
+            break;
+        case DIV_OP:
         case MOD_OP:
+            if (sec.divzero) {
+                string ok = newLabel("dzk");
+                emit("testl %ecx, %ecx");
+                emit("jne " + ok);
+                secFail(SEC_DIV_ZERO, e->line, e->col);
+                label(ok);
+            }
+            if (sec.overflow) {
+                // INT_MIN / -1 desborda (y el hardware lo trata como excepcion)
+                string ok = newLabel("dok");
+                emit("cmpl $-1, %ecx");
+                emit("jne " + ok);
+                emit("cmpl $-2147483648, %eax");
+                emit("jne " + ok);
+                secFail(SEC_OVERFLOW, e->line, e->col);
+                label(ok);
+            }
             emit("cltd");
             emit("idivl %ecx");
-            emit("movl %edx, %eax");
+            if (e->op == MOD_OP) emit("movl %edx, %eax");
             break;
         case BIT_AND_OP: emit("andl %ecx, %eax"); break;
         case BIT_OR_OP:  emit("orl %ecx, %eax"); break;
@@ -2079,6 +2208,11 @@ void Gencode::genFunction(FunDecl* fun, RecordDecl* owner) {
     emit("pushq %rbp");
     emit("movq %rsp, %rbp");
     emit("subq $" + to_string(L.frameSize) + ", %rsp");
+    if (sec.canary) {
+        // el TypeChecker reservo -8(%rbp): queda por encima de todos los locales
+        emit("movq rt_stack_guard(%rip), %r11");
+        emit("movq %r11, -8(%rbp)");
+    }
 
     if (L.retAbi.pass == Pass::HIDDEN_PTR) {
         emit("movq %rdi, " + to_string(L.retPtrOffset) + "(%rbp)");
@@ -2086,6 +2220,15 @@ void Gencode::genFunction(FunDecl* fun, RecordDecl* owner) {
     genParamSpill(fun);
 
     if (isMain) emit("call __init_globals");
+
+    if (sec.recursion) {
+        string ok = newLabel("rok");
+        emit("incl rt_depth(%rip)");
+        emit("cmpl $" + to_string(sec.maxDepth) + ", rt_depth(%rip)");
+        emit("jle " + ok);
+        secFail(SEC_RECURSION, fun->line, fun->col);
+        label(ok);
+    }
 
     pushScope();
     if (fun->funKind == FunKind::CTOR && owner) genFieldInits(fun, owner);
@@ -2102,6 +2245,7 @@ void Gencode::genFunction(FunDecl* fun, RecordDecl* owner) {
     if (isMain) emit("movl $0, %eax");
 
     label(endLabel);
+    if (sec.recursion) emit("decl rt_depth(%rip)");
     if (fun->funKind == FunKind::DTOR && owner) genFieldDtors(owner);
     if (isMain) {
         emit("pushq %rax");
@@ -2123,6 +2267,14 @@ void Gencode::genFunction(FunDecl* fun, RecordDecl* owner) {
             break;
         default:
             break;
+    }
+    if (sec.canary) {
+        string ok = newLabel("cok");
+        emit("movq -8(%rbp), %r11");
+        emit("cmpq rt_stack_guard(%rip), %r11");
+        emit("je " + ok);
+        secFail(SEC_STACK_SMASH, fun->line, fun->col);
+        label(ok);
     }
     emit("leave");
     emit("ret");

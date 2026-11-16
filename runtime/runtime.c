@@ -179,3 +179,128 @@ void rt_read_string(String *s) {
     }
     if (c != EOF) ungetc(c, stdin);
 }
+
+/* ------------------------------------------------------------------------------------
+ * Soporte de seguridad (solo se usa cuando el programa se compila con --sec=...)
+ * ------------------------------------------------------------------------------------ */
+#include <stdint.h>
+#include <unistd.h>
+
+/* Canario de pila: valor aleatorio por ejecucion; el byte bajo es 0 para cortar cadenas */
+unsigned long rt_stack_guard = 0x2f5a91c37d00UL;
+/* Profundidad actual de recursion */
+int rt_depth = 0;
+
+__attribute__((constructor)) static void rt_init_guard(void) {
+    unsigned long v = 0;
+    FILE *f = fopen("/dev/urandom", "rb");
+    if (f) {
+        if (fread(&v, sizeof v, 1, f) != 1) v = 0;
+        fclose(f);
+    }
+    if (v) rt_stack_guard = v & ~0xffUL;
+}
+
+static const char *rt_kind_name(int kind) {
+    switch (kind) {
+        case 1: return "acceso fuera de limites en arreglo";
+        case 2: return "desreferencia de puntero nulo";
+        case 3: return "division entre cero";
+        case 4: return "desbordamiento aritmetico de entero";
+        case 5: return "desbordamiento de pila detectado por el canario";
+        case 6: return "limite de profundidad de recursion excedido";
+        case 7: return "doble liberacion (double free)";
+        case 8: return "uso despues de liberar (use-after-free)";
+        case 9: return "desbordamiento de heap detectado al liberar";
+        case 10: return "liberacion de un puntero que no proviene de new";
+        default: return "violacion de seguridad";
+    }
+}
+
+/* Termina el programa de forma controlada indicando el tipo de error y su ubicacion */
+void rt_fail(int kind, int line, int col) {
+    fflush(stdout);
+    if (kind == 5) {
+        fprintf(stderr, "Error de seguridad: %s (funcion declarada en linea %d, columna %d)\n", rt_kind_name(kind), line,
+                col);
+    } else {
+        fprintf(stderr, "Error de seguridad: %s en linea %d, columna %d\n", rt_kind_name(kind), line, col);
+    }
+    fflush(stderr);
+    _exit(70);
+}
+
+/* Asignador instrumentado: cabecera con tamano y marca, zona roja al final, cuarentena
+ * de bloques liberados y relleno con 0xDD para que un uso posterior se note. */
+#define RT_HDR 16
+#define RT_RZ 16
+#define RT_MAGIC_LIVE 0x4c49564541525445UL
+#define RT_MAGIC_FREE 0x4652454544424c4bUL
+#define RT_QUAR 64
+
+typedef struct {
+    size_t size;
+    unsigned long magic;
+} RtHdr;
+
+static char *rt_heap_lo = NULL;
+static char *rt_heap_hi = NULL;
+static char *rt_quar_ptr[RT_QUAR];
+static size_t rt_quar_size[RT_QUAR];
+static int rt_quar_n = 0;
+static int rt_quar_next = 0;
+static char *rt_quar_lo = NULL;   /* rango de direcciones de la cuarentena: filtro rapido */
+static char *rt_quar_hi = NULL;
+
+void *rt_malloc(size_t n) {
+    char *base = (char *)malloc(RT_HDR + n + RT_RZ);
+    if (!base) {
+        fputs("runtime: sin memoria\n", stderr);
+        exit(1);
+    }
+    RtHdr *h = (RtHdr *)base;
+    h->size = n;
+    h->magic = RT_MAGIC_LIVE;
+    memset(base + RT_HDR + n, 0xFD, RT_RZ);
+    if (!rt_heap_lo || base < rt_heap_lo) rt_heap_lo = base;
+    if (!rt_heap_hi || base + RT_HDR + n + RT_RZ > rt_heap_hi) rt_heap_hi = base + RT_HDR + n + RT_RZ;
+    return base + RT_HDR;
+}
+
+void rt_free(void *p, int line, int col) {
+    if (!p) return;
+    char *u = (char *)p;
+    if (!rt_heap_lo || u - RT_HDR < rt_heap_lo || u >= rt_heap_hi) rt_fail(10, line, col);
+    RtHdr *h = (RtHdr *)(u - RT_HDR);
+    if (h->magic == RT_MAGIC_FREE) rt_fail(7, line, col);
+    if (h->magic != RT_MAGIC_LIVE) rt_fail(10, line, col);
+    const unsigned char *rz = (const unsigned char *)u + h->size;
+    for (int i = 0; i < RT_RZ; i++) {
+        if (rz[i] != 0xFD) rt_fail(9, line, col);
+    }
+    h->magic = RT_MAGIC_FREE;
+    memset(u, 0xDD, h->size);
+    /* cuarentena circular: al llenarse se devuelve a libc el bloque mas antiguo */
+    if (rt_quar_n == RT_QUAR) {
+        free(rt_quar_ptr[rt_quar_next] - RT_HDR);
+    } else {
+        rt_quar_n++;
+    }
+    rt_quar_ptr[rt_quar_next] = u;
+    rt_quar_size[rt_quar_next] = h->size;
+    if (!rt_quar_lo || u < rt_quar_lo) rt_quar_lo = u;
+    if (!rt_quar_hi || u + h->size + 1 > rt_quar_hi) rt_quar_hi = u + h->size + 1;
+    rt_quar_next = (rt_quar_next + 1) % RT_QUAR;
+}
+
+/* Comprueba una direccion que se va a usar: nula o dentro de un bloque ya liberado */
+void *rt_check_ptr(void *p, int line, int col) {
+    char *a = (char *)p;
+    if (!a) rt_fail(2, line, col);
+    if (rt_quar_n > 0 && a >= rt_quar_lo && a < rt_quar_hi) {
+        for (int i = 0; i < rt_quar_n; i++) {
+            if (a >= rt_quar_ptr[i] && a < rt_quar_ptr[i] + (rt_quar_size[i] ? rt_quar_size[i] : 1)) rt_fail(8, line, col);
+        }
+    }
+    return p;
+}

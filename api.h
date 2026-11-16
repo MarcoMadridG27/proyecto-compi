@@ -3,6 +3,7 @@
 
 #include <string>
 #include <vector>
+#include "security.h"
 
 using namespace std;
 
@@ -10,7 +11,9 @@ using namespace std;
 struct ApiOptions {
     string mode = "all";           // scan, ast, check, asm, all
     bool optimize = false;         // -O1
-    vector<string> passes;         // inline, fold, sethi
+    vector<string> passes;         // inline, cprop, fold, strength, dce, sethi, peephole
+    SecurityOptions sec;           // mecanismos de seguridad (--sec=...)
+    vector<string> optNotes;       // avisos del driver sobre pases desactivados
 };
 
 // Ejecuta el pipeline sobre el codigo fuente y devuelve el JSON de respuesta

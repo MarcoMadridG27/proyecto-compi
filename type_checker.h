@@ -32,6 +32,7 @@ public:
     FunDecl* currentFunction;
     RecordDecl* currentRecord;                   // record cuyo metodo se esta verificando
     int loopDepth;
+    bool reserveCanary = false;                  // reserva -8(%rbp) para el canario de pila
 
     vector<string> errors;
     vector<string> warnings;

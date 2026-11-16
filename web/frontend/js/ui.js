@@ -158,7 +158,7 @@
     VIEWS.forEach(function (v, i) { add("Vistas", "Ir a " + v[1], "arrow", function () { App.selectTab(v[0]); }, i < 8 ? "Alt " + (i + 1) : ""); });
     add("Optimización", "Usar -O0", "zap", function () { setRadio("opt", "0"); });
     add("Optimización", "Usar -O1", "zap", function () { setRadio("opt", "1"); });
-    ["fold", "inline", "sethi"].forEach(function (p) { add("Optimización", "Alternar el pase " + p, "sparkle", function () { togglePass(p); }, "-O1"); });
+    ["inline", "cprop", "fold", "strength", "dce", "sethi", "peephole"].forEach(function (p) { add("Optimización", "Alternar el pase " + p, "sparkle", function () { togglePass(p); }, "-O1"); });
     ["all", "run", "asm", "check", "ast", "scan"].forEach(function (m) {
       add("Modo de salida", "Modo " + m, "terminal", function () {
         var s = $("mode-select"); s.value = m; s.dispatchEvent(new Event("change"));

@@ -45,7 +45,9 @@ NOFILE_LIMIT = 64
 MAX_COMPILER_OUTPUT = 64 * 1024 * 1024
 
 MODES = ("scan", "ast", "check", "asm", "run", "all")
-PASSES = ("fold", "inline", "sethi")
+PASSES = ("inline", "cprop", "fold", "strength", "dce", "sethi", "peephole")
+SECURITY = ("static", "bounds", "null", "div", "overflow", "canary", "heap", "recursion", "harden")
+HARDEN_FLAGS = ["-fPIE", "-pie", "-Wl,-z,relro,-z,now,-z,noexecstack"]
 
 
 def resolve_compiler():
@@ -212,10 +214,12 @@ def clean_env(tmp):
             "HOME": tmp}
 
 
-def invoke_compiler(code, mode, optimize, passes):
+def invoke_compiler(code, mode, optimize, passes, security=()):
     cmd = compiler_command() + ["--api", "--mode", mode, "-O1" if optimize else "-O0"]
     if optimize and passes:
         cmd += ["--passes", ",".join(passes)]
+    if security:
+        cmd.append("--sec=" + ",".join(security))
     try:
         res = run_limited(cmd, code.encode("utf-8"), COMPILE_TIMEOUT, "/",
                           {"PATH": "/usr/bin:/bin", "LANG": "C"}, MAX_COMPILER_OUTPUT)
@@ -234,7 +238,7 @@ def invoke_compiler(code, mode, optimize, passes):
     return data, None
 
 
-def assemble_and_run(asm, stdin, timeout, tmp, runtime):
+def assemble_and_run(asm, stdin, timeout, tmp, runtime, security=()):
     """Devuelve (info, errores, fase_alcanzada)."""
     info = {"stdout": None, "stderr": None, "exit_code": None, "duration_ms": None,
             "truncated": False, "stdout_truncated": False, "stderr_truncated": False,
@@ -247,6 +251,8 @@ def assemble_and_run(asm, stdin, timeout, tmp, runtime):
     with open(src, "w", encoding="utf-8") as f:
         f.write(asm)
     flags = os.environ.get("ASM_LINK_FLAGS", "").split()
+    if "harden" in security:
+        flags = flags + HARDEN_FLAGS
     try:
         res = run_limited(["gcc", "prog.s", runtime, "-o", "prog"] + flags, None, ASSEMBLE_TIMEOUT,
                           tmp, clean_env(tmp), 64 * 1024)
@@ -279,6 +285,16 @@ def assemble_and_run(asm, stdin, timeout, tmp, runtime):
         errors.append(err("run", "el programa termino por la senal %s" % sig))
     else:
         info["exit_code"] = res["returncode"]
+        # violacion de seguridad detectada en tiempo de ejecucion (rt_fail termina con codigo 70)
+        m = re.search(r"Error de seguridad: (.*?)(?: en linea (\d+), columna (\d+)| \(funcion declarada en linea (\d+), columna (\d+)\))?\s*$",
+                      info["stderr"].strip().splitlines()[-1] if info["stderr"].strip() else "")
+        if res["returncode"] == 70 and m:
+            line = m.group(2) or m.group(4)
+            col = m.group(3) or m.group(5)
+            info["security_violation"] = {"message": m.group(1), "line": int(line) if line else None,
+                                          "column": int(col) if col else None}
+            errors.append(err("seguridad", "Violación de seguridad en ejecución: " + m.group(1),
+                              int(line) if line else None, int(col) if col else None))
     return info, errors, "run"
 
 
@@ -290,7 +306,7 @@ def compile_once(req, optimize, passes, tmp, runtime):
     """Un ciclo completo de compilacion (y ejecucion si el modo lo pide)."""
     mode = req["mode"]
     cmode = {"run": "asm"}.get(mode, mode)
-    data, problem = invoke_compiler(req["code"], cmode, optimize, passes)
+    data, problem = invoke_compiler(req["code"], cmode, optimize, passes, req["security"])
     if data is None:
         return {"success": False, "phase": "internal", "errors": [err("internal", problem)],
                 "warnings": [], "tokens": None, "ast": None, "typed_ast": None, "layout": None,
@@ -307,7 +323,7 @@ def compile_once(req, optimize, passes, tmp, runtime):
            "truncated": False, "stdout_truncated": False, "stderr_truncated": False, "signal": None}
     if mode in ("run", "all") and data["success"] and isinstance(data.get("assembly"), str):
         run, errors, phase = assemble_and_run(data["assembly"], req["stdin"], req["timeout"],
-                                              tmp, runtime)
+                                              tmp, runtime, req["security"])
         data["phase"] = phase
         if errors:
             data["errors"] = data["errors"] + errors
@@ -353,7 +369,7 @@ def handle_compile(req):
                 "asm_lines": {"o0": count_lines(r0.get("assembly")),
                               "o1": count_lines(r1.get("assembly"))},
             }
-        resp["options"] = {"optimize": optimize, "passes": passes if optimize else []}
+        resp["options"] = {"optimize": optimize, "passes": passes if optimize else [], "security": req["security"]}
         return (502 if internal else 200), san.walk(resp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -401,6 +417,12 @@ def validate(body):
     compare = req.get("compare", False)
     if not isinstance(compare, bool):
         problems.append("El campo 'compare' debe ser booleano.")
+    security = req.get("security", [])
+    if security is None:
+        security = []
+    if not isinstance(security, list) or any(not isinstance(s, str) or s not in SECURITY for s in security):
+        problems.append("El campo 'security' debe ser una lista con valores de: %s." % ", ".join(SECURITY))
+        security = []
     if problems:
         return None, bad_request(*problems)
     passes_given = passes is not None
@@ -413,7 +435,8 @@ def validate(body):
         passes = []
     return {"code": code, "mode": mode, "optimize": optimize, "passes": passes,
             "passes_given": passes_given, "stdin": stdin,
-            "timeout": min(float(timeout), MAX_TIMEOUT), "compare": compare}, None
+            "timeout": min(float(timeout), MAX_TIMEOUT), "compare": compare,
+            "security": [s for s in SECURITY if s in security]}, None
 
 
 _version_cache = {}

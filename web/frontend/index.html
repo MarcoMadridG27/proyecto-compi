@@ -1,3 +1,13 @@
+  <div class="opt-group" role="group" aria-label="Pases de optimización">
+    <label class="switch" data-tip="inline: expansión en línea de funciones puras"><input type="checkbox" class="pass" value="inline" checked disabled><span class="sw-track"><span class="sw-thumb"></span></span><span class="sw-label">inline</span></label>
+    <label class="switch" data-tip="cprop: propagación de constantes"><input type="checkbox" class="pass" value="cprop" checked disabled><span class="sw-track"><span class="sw-thumb"></span></span><span class="sw-label">cprop</span></label>
+    <label class="switch" data-tip="fold: plegado de constantes y simplificación algebraica"><input type="checkbox" class="pass" value="fold" checked disabled><span class="sw-track"><span class="sw-thumb"></span></span><span class="sw-label">fold</span></label>
+    <label class="switch" data-tip="strength: reducción de fuerza (x * 2^k a desplazamiento)"><input type="checkbox" class="pass" value="strength" checked disabled><span class="sw-track"><span class="sw-thumb"></span></span><span class="sw-label">strength</span></label>
+    <label class="switch" data-tip="dce: eliminación de código muerto e inalcanzable"><input type="checkbox" class="pass" value="dce" checked disabled><span class="sw-track"><span class="sw-thumb"></span></span><span class="sw-label">dce</span></label>
+    <label class="switch" data-tip="sethi: orden de evaluación Sethi-Ullman"><input type="checkbox" class="pass" value="sethi" checked disabled><span class="sw-track"><span class="sw-thumb"></span></span><span class="sw-label">sethi</span></label>
+    <label class="switch" data-tip="peephole: optimización de mirilla sobre el ensamblador"><input type="checkbox" class="pass" value="peephole" checked disabled><span class="sw-track"><span class="sw-thumb"></span></span><span class="sw-label">peephole</span></label>
+  </div>
+
 <!doctype html>
 <html lang="es">
 <head>
@@ -163,6 +173,21 @@
           <option value="ast">AST (ast)</option>
           <option value="scan">Tokens (scan)</option>
         </select>
+      </div>
+      <div class="pop-field">
+        <span id="sec-label">Seguridad</span>
+        <div class="sec-grid" role="group" aria-labelledby="sec-label">
+          <label class="switch" data-tip="Análisis estático: sin inicializar, retorno faltante, índices, constantes, nulos, colgantes"><input type="checkbox" class="secopt" value="static"><span class="sw-track"><span class="sw-thumb"></span></span><span class="sw-label">static</span></label>
+          <label class="switch" data-tip="Verifica límites de arreglos y strings"><input type="checkbox" class="secopt" value="bounds"><span class="sw-track"><span class="sw-thumb"></span></span><span class="sw-label">bounds</span></label>
+          <label class="switch" data-tip="Verifica punteros nulos"><input type="checkbox" class="secopt" value="null"><span class="sw-track"><span class="sw-thumb"></span></span><span class="sw-label">null</span></label>
+          <label class="switch" data-tip="Detecta división entre cero"><input type="checkbox" class="secopt" value="div"><span class="sw-track"><span class="sw-thumb"></span></span><span class="sw-label">div</span></label>
+          <label class="switch" data-tip="Detecta desbordamiento de enteros"><input type="checkbox" class="secopt" value="overflow"><span class="sw-track"><span class="sw-thumb"></span></span><span class="sw-label">overflow</span></label>
+          <label class="switch" data-tip="Canario de pila"><input type="checkbox" class="secopt" value="canary"><span class="sw-track"><span class="sw-thumb"></span></span><span class="sw-label">canary</span></label>
+          <label class="switch" data-tip="Asignador instrumentado: doble free, use-after-free, desbordamiento de heap"><input type="checkbox" class="secopt" value="heap"><span class="sw-track"><span class="sw-thumb"></span></span><span class="sw-label">heap</span></label>
+          <label class="switch" data-tip="Límite de profundidad de recursión"><input type="checkbox" class="secopt" value="recursion"><span class="sw-track"><span class="sw-thumb"></span></span><span class="sw-label">recursion</span></label>
+          <label class="switch" data-tip="Endurecimiento: PIE, pila no ejecutable, RELRO"><input type="checkbox" class="secopt" value="harden"><span class="sw-track"><span class="sw-thumb"></span></span><span class="sw-label">harden</span></label>
+        </div>
+        <span class="pop-hint">Los mecanismos dinámicos terminan el programa con un mensaje y su ubicación.</span>
       </div>
       <div class="pop-field">
         <span id="timeout-label">Tiempo límite de ejecución</span>

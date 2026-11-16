@@ -8,6 +8,8 @@
 #include "type_checker.h"
 #include "gencode.h"
 #include "optimizer.h"
+#include "security.h"
+#include "security_analysis.h"
 
 using namespace std;
 
@@ -622,6 +624,7 @@ string runApi(const string& source, const ApiOptions& opts) {
     bool wantAsm = mode == "asm" || mode == "all";
 
     string tokens = "null", ast = "null", typedAst = "null", layout = "null", assembly = "null", optim = "null";
+    string secJson = "null";
     vector<Diagnostic> errors, warnings;
     string phase = "lex";
     bool success = false;
@@ -631,7 +634,7 @@ string runApi(const string& source, const ApiOptions& opts) {
         o << "{\"success\":" << (success ? "true" : "false") << ",\"phase\":" << jstr(phase) << ",\"errors\":"
           << diagJson(errors) << ",\"warnings\":" << diagJson(warnings) << ",\"tokens\":" << tokens
           << ",\"ast\":" << ast << ",\"typed_ast\":" << typedAst << ",\"layout\":" << layout
-          << ",\"assembly\":" << assembly << ",\"optimizations\":" << optim << "}";
+          << ",\"assembly\":" << assembly << ",\"optimizations\":" << optim << ",\"security\":" << secJson << "}";
         return o.str();
     };
 
@@ -697,6 +700,7 @@ string runApi(const string& source, const ApiOptions& opts) {
     // semantica y layout
     phase = "typecheck";
     TypeChecker checker;
+    checker.reserveCanary = opts.sec.canary;
     checker.check(prog);
     warnings = checker.warningList;
     if (checker.hasErrors()) {
@@ -705,11 +709,42 @@ string runApi(const string& source, const ApiOptions& opts) {
         return respond();
     }
 
+    // analisis estatico de seguridad
+    {
+        vector<Diagnostic> findings;
+        if (opts.sec.statik) {
+            SecurityAnalyzer sa;
+            sa.analyze(prog);
+            findings = sa.findings;
+            for (const Diagnostic& d : findings) warnings.push_back(d);
+        }
+        ostringstream so;
+        so << "{\"static\":" << (opts.sec.statik ? "true" : "false") << ",\"dynamic\":[";
+        bool f1 = true;
+        auto flag = [&](bool on, const char* name) {
+            if (!on) return;
+            so << (f1 ? "" : ",") << "\"" << name << "\"";
+            f1 = false;
+        };
+        flag(opts.sec.bounds, "bounds");
+        flag(opts.sec.nullchk, "null");
+        flag(opts.sec.divzero, "div");
+        flag(opts.sec.overflow, "overflow");
+        flag(opts.sec.canary, "canary");
+        flag(opts.sec.heap, "heap");
+        flag(opts.sec.recursion, "recursion");
+        flag(opts.sec.harden, "harden");
+        so << "],\"findings\":" << diagJson(findings) << "}";
+        secJson = so.str();
+    }
+
     // optimizacion opcional
     OptReport rep;
     bool discarded = false;
+    string beforeJson = "null", afterJson = "null";
+    bool optRan = false;
     if (opts.optimize && !opts.passes.empty()) {
-        string before = nodeJson(prog, false);
+        beforeJson = nodeJson(prog, false);
         bool ok = runOptimizations(prog, checker, opts.passes, rep);
         if (!ok) {
             discarded = true;
@@ -719,7 +754,15 @@ string runApi(const string& source, const ApiOptions& opts) {
             parseSource(prog);
             checker.check(prog);
         }
-        string after = nodeJson(prog, false);
+        afterJson = nodeJson(prog, false);
+        optRan = true;
+        for (const string& n : opts.optNotes) rep.log.push_back(n);
+    } else {
+        optim = "{\"enabled\":false,\"passes\":[],\"stats\":{},\"log\":[],\"ast_before\":null,\"ast_after\":null}";
+    }
+
+    auto buildOptim = [&]() {
+        if (!optRan) return;
         ostringstream o;
         o << "{\"enabled\":" << (discarded ? "false" : "true") << ",\"passes\":[";
         for (size_t i = 0; i < rep.passes.size(); i++) o << (i ? "," : "") << jstr(rep.passes[i]);
@@ -732,11 +775,10 @@ string runApi(const string& source, const ApiOptions& opts) {
         }
         o << "},\"log\":[";
         for (size_t i = 0; i < rep.log.size(); i++) o << (i ? "," : "") << jstr(rep.log[i]);
-        o << "],\"ast_before\":" << before << ",\"ast_after\":" << after << "}";
+        o << "],\"ast_before\":" << beforeJson << ",\"ast_after\":" << afterJson << "}";
         optim = o.str();
-    } else {
-        optim = "{\"enabled\":false,\"passes\":[],\"stats\":{},\"log\":[],\"ast_before\":null,\"ast_after\":null}";
-    }
+    };
+    buildOptim();
 
     typedAst = nodeJson(prog, true);
     layout = layoutJson(prog, checker);
@@ -752,9 +794,23 @@ string runApi(const string& source, const ApiOptions& opts) {
     phase = "gencode";
     try {
         ostringstream asmOut;
-        Gencode gen(checker.records);
+        Gencode gen(checker.records, opts.sec);
+        if (opts.optimize && !discarded) {
+            for (const string& p : opts.passes) {
+                if (p == "peephole") gen.peephole = true;
+            }
+        }
         gen.generate(prog, asmOut);
         assembly = jstr(asmOut.str());
+        if (gen.peephole) {
+            PassResult pr;
+            pr.name = "peephole";
+            pr.count = gen.peepholeCount;
+            pr.details = gen.peepholeDetails;
+            rep.passes.push_back("peephole");
+            rep.results.push_back(pr);
+            buildOptim();
+        }
     } catch (const exception& e) {
         errors.push_back({"gencode", e.what(), 0, 0});
         delete prog;

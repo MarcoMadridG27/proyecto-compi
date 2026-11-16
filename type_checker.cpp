@@ -1695,7 +1695,8 @@ Type TypeChecker::checkCall(PostfixExp* call) {
                     return annotate(call, makeType(Type::VOID));
                 }
                 if (m == "push_back" && n == 1) {
-                    if (!decay(call->args[0]->inferredType.withoutRef()).isChar()) {
+                    // C++ convierte implicitamente un int (por ejemplo 'a' + 1) a char
+                    if (!decay(call->args[0]->inferredType.withoutRef()).isIntegral()) {
                         addError("push_back espera un char", call->line, call->col);
                         return annotate(call, Type::makeError());
                     }
@@ -2448,7 +2449,7 @@ void TypeChecker::planCtor(FunDecl* fun, RecordDecl* rec) {
 
 void TypeChecker::visit(FunDecl* fun) {
     currentFunction = fun;
-    frameUsed = 0;
+    frameUsed = reserveCanary ? 8 : 0;
     loopDepth = 0;
     env.add_level(); // ambito de la funcion
 

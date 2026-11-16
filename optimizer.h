@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <map>
 #include "visitor.h"
 #include "ast.h"
 #include "type_checker.h"
@@ -123,6 +124,53 @@ private:
     int label(const Exp* e) const;
 };
 
+// Propagacion de constantes: sustituye las lecturas de variables locales que nunca se
+// modifican despues de inicializarse con un literal (y las constantes const conocidas)
+class ConstPropVisitor : public RewriteVisitor {
+public:
+    PassResult result;
+    ConstPropVisitor() { result.name = "cprop"; }
+    void visit(FunDecl* fun) override;
+    Type visit(UnaryExp* exp) override;
+protected:
+    Exp* post(Exp* e) override;
+private:
+    struct Val {
+        int kind = 0;           // 1 int, 2 bool, 3 char
+        long long v = 0;
+    };
+    map<int, Val> constants;    // slot local -> valor
+    void analyze(FunDecl* fun);
+};
+
+// Reduccion de fuerza: x * 2^k pasa a x << k
+class StrengthVisitor : public RewriteVisitor {
+public:
+    PassResult result;
+    StrengthVisitor() { result.name = "strength"; }
+protected:
+    Exp* post(Exp* e) override;
+};
+
+// Eliminacion de codigo muerto e inalcanzable: sentencias tras return/break/continue y
+// ramas de if/while cuya condicion es una constante
+class DeadCodeEliminator {
+public:
+    PassResult result;
+    DeadCodeEliminator() { result.name = "dce"; }
+    void run(Program* prog);
+private:
+    void function(FunDecl* f);
+    void block(BlockStmt* b);
+    ASTNode* simplify(ASTNode* n);
+    Stmt* simplifyStmt(Stmt* s);
+    bool terminates(ASTNode* n);
+    void note(const ASTNode* n, const string& what);
+};
+
+// Optimizacion de mirilla sobre el ensamblador ya generado (devuelve el texto mejorado)
+string runPeephole(const string& asmText, PassResult& res);
+
 struct OptReport {
     bool enabled = false;
     vector<string> passes;          // pases ejecutados, en orden
@@ -130,7 +178,7 @@ struct OptReport {
     vector<string> log;
 };
 
-// Ejecuta los pases pedidos (inline, fold, sethi; siempre en ese orden) sobre un AST ya
+// Ejecuta los pases pedidos (inline, cprop, fold, strength, dce, sethi; siempre en ese orden) sobre un AST ya
 // verificado y lo vuelve a verificar despues de cada uno. Devuelve false si alguna
 // verificacion posterior falla: el llamador debe descartar el AST y compilar sin optimizar.
 bool runOptimizations(Program* ast, TypeChecker& checker, const vector<string>& passes, OptReport& rep);

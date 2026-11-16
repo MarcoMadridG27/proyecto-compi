@@ -9,6 +9,8 @@
 #include "type_checker.h"
 #include "gencode.h"
 #include "optimizer.h"
+#include "security.h"
+#include "security_analysis.h"
 #include "api.h"
 #include <iterator>
 #include <sstream>
@@ -34,8 +36,10 @@ void mostrarAyuda(const char* prog) {
     cout << "  --all     : Ejecuta todas las fases del Frontend y genera reportes.\n";
     cout << "  --asm [salida.s] : Genera ensamblador GNU AS (AT&T, Linux x86-64). Por defecto <archivo>.s\n";
     cout << "  -O0       : Sin optimizaciones (por defecto).\n";
-    cout << "  -O1       : Activa los pases de optimización sobre el AST (inline, fold, sethi).\n";
-    cout << "  --passes a,b : Con -O1, elige los pases (por defecto inline,fold,sethi).\n";
+    cout << "  -O1       : Activa los pases de optimización (inline, cprop, fold, strength, dce, sethi, peephole).\n";
+    cout << "  --passes a,b : Con -O1, elige los pases (por defecto todos).\n";
+    cout << "  --sec=lista  : Mecanismos de seguridad (static,bounds,null,div,overflow,canary,heap,recursion,harden o all).\n";
+    cout << "  --max-depth=N : Con --sec=recursion, límite de profundidad (por defecto 20000).\n";
     cout << "  --report-opt : Con -O1, imprime las transformaciones aplicadas.\n";
     cout << "  --api --mode <scan|ast|check|asm|all> [-O1] [--passes ...] : lee el código por stdin y emite JSON.\n";
     cout << "  --version : Muestra la versión.\n";
@@ -64,6 +68,7 @@ int main(int argc, const char* argv[]) {
     string apiModeName = "all";
     vector<string> passes;
     bool passesGiven = false;
+    SecurityOptions sec;
     for (int i = 1; i < argc; i++) {
         string a = argv[i];
         if (a == "-O1") optimize = true;
@@ -74,18 +79,38 @@ int main(int argc, const char* argv[]) {
             cout << "mini-compilador-cpp 1.0\n";
             return 0;
         } else if (a == "--mode" && i + 1 < argc) apiModeName = argv[++i];
-        else if (a == "--passes" && i + 1 < argc) {
+        else if (a.rfind("--sec=", 0) == 0) {
+            string bad;
+            if (!parseSecurityList(a.substr(6), sec, bad)) {
+                cerr << "Error: mecanismo de seguridad desconocido: " << bad << endl;
+                return 2;
+            }
+        } else if (a.rfind("--max-depth=", 0) == 0) {
+            sec.maxDepth = atoi(a.c_str() + 12);
+        } else if (a == "--passes" && i + 1 < argc) {
             passes = splitList(argv[++i]);
             passesGiven = true;
         } else pos.push_back(a);
     }
-    if (!passesGiven) passes = {"inline", "fold", "sethi"};
+    if (!passesGiven) passes = {"inline", "cprop", "fold", "strength", "dce", "sethi", "peephole"};
+    // x * 2^k => x << k no detecta desbordamiento: con la verificacion de desbordamiento se desactiva
+    vector<string> optNotes;
+    if (sec.overflow) {
+        vector<string> keep;
+        for (const string& p : passes) {
+            if (p == "strength") optNotes.push_back("strength desactivado: --sec=overflow necesita la multiplicacion original");
+            else keep.push_back(p);
+        }
+        passes = keep;
+    }
 
     if (apiMode) {
         ApiOptions ao;
         ao.mode = apiModeName;
         ao.optimize = optimize;
         ao.passes = passes;
+        ao.sec = sec;
+        ao.optNotes = optNotes;
         string source((istreambuf_iterator<char>(cin)), istreambuf_iterator<char>());
         cout << runApi(source, ao) << endl;
         return 0;
@@ -162,6 +187,7 @@ int main(int argc, const char* argv[]) {
     // 3. Análisis Semántico y Comprobación de Tipos (TypeChecker)
     cout << "\n=== [FASE 3: ANÁLISIS SEMÁNTICO Y COMPROBACIÓN DE TIPOS] ===\n";
     TypeChecker checker;
+    checker.reserveCanary = sec.canary;
     checker.check(ast);
     checker.printReport(cout);
 
@@ -172,6 +198,17 @@ int main(int argc, const char* argv[]) {
     }
 
     cout << "\n[ÉXITO] El programa es sintáctica y semánticamente correcto según la gramática EBNF.\n";
+
+    // Análisis estático de seguridad
+    if (sec.statik) {
+        SecurityAnalyzer sa;
+        sa.analyze(ast);
+        cout << "\n=== [SEGURIDAD: ANÁLISIS ESTÁTICO] ===\n";
+        if (sa.findings.empty()) cout << "  Sin hallazgos.\n";
+        for (const Diagnostic& d : sa.findings) {
+            cout << "  Advertencia de seguridad [Línea " << d.line << ", Columna " << d.col << "] " << d.message << "\n";
+        }
+    }
 
     // Optimización opcional (-O1): pases sobre el AST y nueva verificación
     if (optimize) {
@@ -190,6 +227,7 @@ int main(int argc, const char* argv[]) {
                 cout << "  " << r.name << ": " << r.count << " transformaciones\n";
                 for (const string& d : r.details) cout << "    " << d << "\n";
             }
+            for (const string& n : optNotes) cout << "  nota: " << n << "\n";
         }
     }
 
@@ -203,8 +241,15 @@ int main(int argc, const char* argv[]) {
             return 1;
         }
         try {
-            Gencode gen(checker.records);
+            Gencode gen(checker.records, sec);
+            for (const string& p : passes) {
+                if (optimize && p == "peephole") gen.peephole = true;
+            }
             gen.generate(ast, outAsm);
+            if (gen.peephole && reportOpt) {
+                cout << "\n=== [PEEPHOLE] ===\n  peephole: " << gen.peepholeCount << " transformaciones\n";
+                for (const string& d : gen.peepholeDetails) cout << "    " << d << "\n";
+            }
         } catch (const exception& e) {
             cerr << "\n[FALLO GENCODE] " << e.what() << endl;
             delete ast;
@@ -212,6 +257,7 @@ int main(int argc, const char* argv[]) {
         }
         outAsm.close();
         cout << "Ensamblador generado en " << asmFile << "\n";
+        if (sec.harden) cout << "Endurecimiento: enlazar con  gcc " << asmFile << " runtime/runtime.c " << hardenLinkFlags() << "\n";
     }
 
     // Si es --all, guardar el AST en archivo de texto

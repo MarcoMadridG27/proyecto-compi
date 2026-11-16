@@ -1,0 +1,3 @@
+# Imagen linux/amd64 para los experimentos: gcc 13 (referencia) + clang
+FROM gcc:13
+RUN apt-get update && apt-get install -y --no-install-recommends clang libclang-rt-14-dev python3 binutils && rm -rf /var/lib/apt/lists/*

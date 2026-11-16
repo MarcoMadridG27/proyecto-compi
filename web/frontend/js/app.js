@@ -263,9 +263,11 @@
   function readOpts() {
     var passes = [];
     document.querySelectorAll(".pass").forEach(function (c) { if (c.checked) passes.push(c.value); });
+    var security = [];
+    document.querySelectorAll(".secopt").forEach(function (c) { if (c.checked) security.push(c.value); });
     return {
       opt: document.querySelector("input[name=opt]:checked").value,
-      passes: passes, mode: $("mode-select").value, timeout: parseInt($("timeout-input").value, 10) || 5
+      passes: passes, security: security, mode: $("mode-select").value, timeout: parseInt($("timeout-input").value, 10) || 5
     };
   }
 
@@ -275,6 +277,9 @@
     if (r) r.checked = true;
     if (Array.isArray(o.passes)) {
       document.querySelectorAll(".pass").forEach(function (c) { c.checked = o.passes.indexOf(c.value) >= 0; });
+    }
+    if (Array.isArray(o.security)) {
+      document.querySelectorAll(".secopt").forEach(function (c) { c.checked = o.security.indexOf(c.value) >= 0; });
     }
     if (o.mode && $("mode-select").querySelector("option[value='" + o.mode + "']")) $("mode-select").value = o.mode;
     if (o.timeout >= 1 && o.timeout <= 10) $("timeout-input").value = o.timeout;
@@ -323,7 +328,7 @@
     var o = readOpts();
     var opt = o.opt === "1" && o.passes.length > 0;
     var req = {
-      code: state.editor.getValue(), mode: mode, optimize: opt, passes: opt ? o.passes : [],
+      code: state.editor.getValue(), mode: mode, optimize: opt, passes: opt ? o.passes : [], security: o.security,
       stdin: $("stdin").value, timeout: Math.min(10, Math.max(1, o.timeout))
     };
     if (extra) Object.keys(extra).forEach(function (k) { req[k] = extra[k]; });
@@ -1797,8 +1802,12 @@
   }
 
   var PASS_META = {
-    fold: { ico: "sparkle", text: "Plegado de constantes" },
+    fold: { ico: "sparkle", text: "Plegado de constantes y simplificación algebraica" },
     inline: { ico: "layers", text: "Expansión en línea" },
+    cprop: { ico: "sparkle", text: "Propagación de constantes" },
+    strength: { ico: "zap", text: "Reducción de fuerza: x * 2^k pasa a x << k" },
+    dce: { ico: "layers", text: "Eliminación de código muerto e inalcanzable" },
+    peephole: { ico: "cpu", text: "Optimización de mirilla sobre el ensamblador" },
     sethi: { ico: "tree", text: "Sethi-Ullman: orden de evaluación" }
   };
 
@@ -1821,7 +1830,7 @@
     var p = $("panel-opt");
     clear(p);
     p._pending = [];
-    if (!r) { p.appendChild(placeholder("Sin resultados de optimización", "Compile con -O1 para aplicar fold, inline y sethi.", "zap")); return; }
+    if (!r) { p.appendChild(placeholder("Sin resultados de optimización", "Compile con -O1 para aplicar inline, cprop, fold, strength, dce, sethi y peephole.", "zap")); return; }
     var opt = r.optimizations;
     var enabled = !!(opt && opt.enabled);
     var passes = (opt && opt.passes) || [];
@@ -2176,6 +2185,7 @@
       r.addEventListener("change", function () { syncPassState(); saveStore({ opts: readOpts() }); updateStatusbar(); });
     });
     document.querySelectorAll(".pass").forEach(function (c) { c.addEventListener("change", function () { saveStore({ opts: readOpts() }); }); });
+    document.querySelectorAll(".secopt").forEach(function (c) { c.addEventListener("change", function () { saveStore({ opts: readOpts() }); }); });
     $("mode-select").addEventListener("change", function () { saveStore({ opts: readOpts() }); syncModeChips(); });
     $("timeout-input").addEventListener("change", function () {
       var v = parseInt(this.value, 10);

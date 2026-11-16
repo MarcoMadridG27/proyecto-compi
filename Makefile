@@ -1,7 +1,7 @@
 CXX = g++
 CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -MMD -MP
 
-SRCS = token.cpp scanner.cpp type.cpp ast.cpp ast_clone.cpp parser.cpp print_visitor.cpp type_checker.cpp gencode.cpp optimizer.cpp api.cpp main.cpp
+SRCS = token.cpp scanner.cpp type.cpp ast.cpp ast_clone.cpp parser.cpp print_visitor.cpp type_checker.cpp gencode.cpp optimizer.cpp security.cpp security_analysis.cpp peephole.cpp api.cpp main.cpp
 OBJS = $(SRCS:.cpp=.o)
 TARGET = compiler
 

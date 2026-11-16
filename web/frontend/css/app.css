@@ -1330,3 +1330,7 @@ ul.plain li { margin: 2px 0; }
   .skeleton i::after, .btn-run.running::after, .spark { display: none; }
 }
 @keyframes blink { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+
+/* Mecanismos de seguridad en el popover de opciones */
+.sec-grid { display: flex; flex-wrap: wrap; gap: 6px; }
+.sec-grid .switch { height: 26px; }

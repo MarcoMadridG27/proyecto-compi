@@ -1,0 +1,6 @@
+# Imagen para compilar el reporte LaTeX
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    texlive-latex-base texlive-latex-recommended texlive-latex-extra texlive-fonts-recommended \
+    texlive-lang-spanish texlive-pictures latexmk ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
